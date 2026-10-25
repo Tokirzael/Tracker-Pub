@@ -1,0 +1,6 @@
+# live data and runtime droppings never belong in a release repo
+data/
+cloudflared/
+*.log
+cf-tunnel-url.txt
+character-tracker-selfhosted.zip
