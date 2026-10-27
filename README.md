@@ -1,4 +1,4 @@
-﻿# Character Tracker â€” Standalone Build
+﻿# Character Tracker - Standalone Build
 
 A self-hosted character sheet tracker. This folder is fully self-contained:
 it ships its own Node runtime, the server, and the web client. Nothing is
