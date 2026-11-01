@@ -1110,6 +1110,30 @@ function secretSatisfies(secret, pin) {
   if (secret.kind === "stored") return digestEq(hexSha256(`${secret.salt}:${pin}`), secret.hash);
   return digestEq(hexSha256(pin), secret.hash);
 }
+var SALT_RE = /^[0-9a-f]{16}$/i;
+var HASH_RE = /^[0-9a-f]{64}$/i;
+function provesSheetKey(root, sheetId, pin) {
+  if (typeof sheetId !== "string" || !sheetId || !pin) return false;
+  let doc;
+  try {
+    doc = JSON.parse(fs2.readFileSync(path2.join(root, "data", "characters.json"), "utf8"));
+  } catch {
+    return false;
+  }
+  const chars = doc?.characters;
+  if (!Array.isArray(chars)) return false;
+  for (const entry of chars) {
+    if (!entry || entry.id !== sheetId) continue;
+    const lock = entry?.character?.lock;
+    if (!lock || typeof lock.salt !== "string" || typeof lock.hash !== "string") return false;
+    if (SALT_RE.test(lock.salt) && HASH_RE.test(lock.hash) && digestEq(hexSha256(`${lock.salt}:${pin}`), lock.hash)) return true;
+    for (const sp of Object.values(lock.segments ?? {})) {
+      if (sp && typeof sp.salt === "string" && typeof sp.hash === "string" && SALT_RE.test(sp.salt) && HASH_RE.test(sp.hash) && digestEq(hexSha256(`${sp.salt}:${pin}`), sp.hash)) return true;
+    }
+    return false;
+  }
+  return false;
+}
 function masterPublicState(secret) {
   if (secret.kind === "stored") return { configured: true, fp: hexSha256(`fp:${secret.salt}:${secret.hash}`) };
   if (secret.kind === "bootstrap") return { configured: true, fp: hexSha256(`fp:env:${secret.hash}`) };
@@ -1364,7 +1388,21 @@ function ownerPlugin() {
         } catch {
           return send(res, 400, { ok: false, error: "bad request" });
         }
-        const deny = authorizeMaster(body?.pin);
+        const pin = typeof body?.pin === "string" ? body.pin : "";
+        if (provesSheetKey(root, body?.sheetId, pin)) {
+          const isMaster = secretSatisfies(secret, pin);
+          const limiter = readLimiter();
+          const was = { ...limiter };
+          if (isMaster) recordSuccess(limiter);
+          if (limiter.failures !== was.failures || limiter.lockedUntil !== was.lockedUntil) saveLimiter(limiter);
+          return send(res, 200, {
+            ok: isMaster,
+            configured: true,
+            fp: masterPublicState(secret).fp,
+            lockoutMs: remainingMs(limiter, Date.now())
+          });
+        }
+        const deny = authorizeMaster(pin);
         if (deny) return send(res, deny.status, deny.body);
         send(res, 200, { ok: true, ...masterPublicState(secret) });
       })();
