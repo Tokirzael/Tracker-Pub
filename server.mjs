@@ -335,13 +335,139 @@ function normalizeRampCounter(ctx, v) {
   return out;
 }
 
-// src/core/theme.ts
-var THEME_ROLES = ["background", "surface", "border", "text", "accent"];
-
 // src/core/types.ts
 var FX_RATE_MIN = 0.5;
 var FX_RATE_MAX = 1.5;
-var SHEET_SEGMENT_IDS = ["header", "stats", "pools", "conditions", "lists", "ramps"];
+var SHEET_SEGMENT_IDS = ["header", "stats", "pools", "conditions", "lists", "ramps", "dice"];
+var DICE_SIDES = [2, 4, 6, 8, 10, 12, 20, 100];
+
+// src/core/dice.ts
+var ROLL_TARGET_BONUS = "roll:bonus";
+var ROLL_TARGET_DICE = "roll:dice";
+var ROLL_TARGET_GOAL = "roll:goal";
+var ROLL_TARGETS = [ROLL_TARGET_BONUS, ROLL_TARGET_DICE, ROLL_TARGET_GOAL];
+var DICE_MAX_PER_FACE = 100;
+function finiteNum(v) {
+  return typeof v === "number" && Number.isFinite(v) ? v : void 0;
+}
+function dieSides(v) {
+  return DICE_SIDES.find((s) => String(s) === String(v));
+}
+function formatDiceFormula(cfg) {
+  const parts = DICE_SIDES.filter((s) => (cfg.counts[s] ?? 0) > 0).map((s) => `${cfg.counts[s]}d${s}`);
+  const base = parts.length ? parts.join(" + ") : "0d0";
+  const cmp = (cfg.goalCompare ?? "gte") === "gte" ? "\u2265" : "\u2264";
+  if (cfg.goalMode === "pool" && cfg.goalTarget !== void 0) return `${base} (each ${cmp} ${cfg.goalTarget})`;
+  if (cfg.goalMode === "total" && cfg.goalTarget !== void 0) return `${base} (total ${cmp} ${cfg.goalTarget})`;
+  return base;
+}
+function normMode(v) {
+  return v === "dnd_mod" || v === "stat_val" || v === "pool_dice" ? v : void 0;
+}
+function normalizeDicePreset(ctx, raw) {
+  if (typeof raw !== "object" || raw === null) return null;
+  const o = raw;
+  const name = typeof o.name === "string" ? o.name.trim().slice(0, 60) : "";
+  const counts = {};
+  if (typeof o.counts === "object" && o.counts !== null) {
+    for (const [k, v] of Object.entries(o.counts)) {
+      const s = dieSides(k);
+      const n = finiteNum(v);
+      if (!s || n === void 0) continue;
+      const c = Math.min(DICE_MAX_PER_FACE, Math.max(0, Math.floor(n)));
+      if (c > 0) counts[s] = c;
+    }
+  }
+  const bonusRaw = finiteNum(o.bonus);
+  const bonus = bonusRaw === void 0 ? 0 : round2(Math.max(-9999, Math.min(9999, bonusRaw)));
+  let statId;
+  if (typeof o.statId === "string") {
+    const node = ctx.nodes.find((n) => n.id === o.statId);
+    if (node && typeof node.baseValue === "number") statId = node.id;
+  }
+  const statMode = normMode(o.statMode);
+  const goalMode = o.goalMode === "pool" || o.goalMode === "total" ? o.goalMode : "off";
+  const goalTargetRaw = finiteNum(o.goalTarget);
+  const goalTarget = goalTargetRaw === void 0 ? void 0 : round2(goalTargetRaw);
+  const preset = {
+    id: typeof o.id === "string" && o.id ? o.id : uid("roll"),
+    name: name || "Roll",
+    counts,
+    bonus,
+    goalMode
+  };
+  if (o.pinned === true) preset.pinned = true;
+  if (o.bonusScope === "each") preset.bonusScope = "each";
+  if (statId) {
+    preset.statId = statId;
+    preset.statMode = statMode ?? "dnd_mod";
+  }
+  if (goalMode !== "off" && goalTarget !== void 0) {
+    preset.goalTarget = goalTarget;
+    if (o.goalCompare === "lte") preset.goalCompare = "lte";
+  }
+  if (o.critRule === "double" || o.critRule === "explode") preset.critRule = o.critRule;
+  if (o.botchOnOne === true) preset.botchOnOne = true;
+  if (typeof o.cost === "object" && o.cost !== null) {
+    const co = o.cost;
+    const target = normalizeRampRef(ctx, co.target);
+    if (target && (target.kind === "node" || target.kind === "item")) {
+      const amt = finiteNum(co.amount);
+      preset.cost = { target, amount: amt === void 0 ? 1 : round2(Math.max(0, Math.min(9999, amt))) };
+    }
+  }
+  if (typeof o.outcome === "object" && o.outcome !== null) {
+    const ou = o.outcome;
+    const target = normalizeRampRef(ctx, ou.target);
+    const op = ou.op === "restore" ? "restore" : ou.op === "set" ? "set" : ou.op === "drain" ? "drain" : null;
+    if (target && op && !(op === "set" && target.kind !== "node")) {
+      preset.outcome = { target, op, metric: ou.metric === "successes" ? "successes" : "total" };
+    }
+  }
+  return preset;
+}
+function refAlive(c, ref) {
+  if (!ref) return false;
+  if (ref.kind === "node") return c.nodes.some((n) => n.id === ref.id);
+  if (ref.kind === "item") return !!c.lists.find((l) => l.id === ref.listId)?.items.find((i) => i.id === ref.itemId);
+  return c.modifiers.some((m) => m.id === ref.id);
+}
+function pruneDicePresets(c) {
+  if (!c.dicePresets?.length) return;
+  for (const p of c.dicePresets) {
+    if (p.statId && !c.nodes.some((n) => n.id === p.statId)) {
+      delete p.statId;
+      delete p.statMode;
+    }
+    if (p.cost && !refAlive(c, p.cost.target)) delete p.cost;
+    if (p.outcome && !refAlive(c, p.outcome.target)) delete p.outcome;
+  }
+}
+function plainDicePresets(list) {
+  return list.map((p) => {
+    const o = {
+      id: p.id,
+      name: p.name,
+      counts: { ...p.counts },
+      bonus: p.bonus,
+      goalMode: p.goalMode
+    };
+    if (p.pinned !== void 0) o.pinned = p.pinned;
+    if (p.bonusScope !== void 0) o.bonusScope = p.bonusScope;
+    if (p.statId !== void 0) o.statId = p.statId;
+    if (p.statMode !== void 0) o.statMode = p.statMode;
+    if (p.goalTarget !== void 0) o.goalTarget = p.goalTarget;
+    if (p.goalCompare !== void 0) o.goalCompare = p.goalCompare;
+    if (p.critRule !== void 0) o.critRule = p.critRule;
+    if (p.botchOnOne !== void 0) o.botchOnOne = p.botchOnOne;
+    if (p.cost) o.cost = { target: { ...p.cost.target }, amount: p.cost.amount };
+    if (p.outcome) o.outcome = { target: { ...p.outcome.target }, op: p.outcome.op, metric: p.outcome.metric };
+    return o;
+  });
+}
+
+// src/core/theme.ts
+var THEME_ROLES = ["background", "surface", "border", "text", "accent"];
 
 // src/core/io.ts
 function str(v, fallback = "") {
@@ -489,7 +615,9 @@ function cloneCharacter(c) {
     }),
     lists: c.lists.map((l) => ({ ...l, items: l.items.map((i) => ({ ...i })) })),
     // deep-copy ramps (refs are nested objects — a shallow spread would share them)
-    ...c.ramps ? { ramps: c.ramps.map((r) => ({ ...r, watch: { ...r.watch }, target: { ...r.target } })) } : {}
+    ...c.ramps ? { ramps: c.ramps.map((r) => ({ ...r, watch: { ...r.watch }, target: { ...r.target } })) } : {},
+    // saved rolls: cost/outcome targets are nested refs — rebuild fully plain
+    ...c.dicePresets ? { dicePresets: plainDicePresets(c.dicePresets) } : {}
   };
   def(out, "race", c.race);
   def(out, "class", c.class);
@@ -734,7 +862,7 @@ function normalizeList(v) {
     items: (Array.isArray(l.items) ? l.items : []).map(normalizeItem).filter((x) => x !== null)
   };
 }
-var DEFAULT_CARDS = ["stats", "conditions", "lists", "pools", "ramps", "activity"];
+var DEFAULT_CARDS = ["stats", "conditions", "lists", "pools", "ramps", "dice", "activity"];
 function reconcileCardOrder(stored) {
   if (!stored?.length) return [...DEFAULT_CARDS];
   const kept = stored.filter((id) => DEFAULT_CARDS.includes(id));
@@ -781,6 +909,9 @@ function normalizeCharacter(v) {
   const rampsU = dedupeIds(
     (Array.isArray(c.ramps) ? c.ramps : []).map((v2) => normalizeRampLink(rampCtxFull, v2)).filter((x) => x !== null)
   );
+  const diceU = dedupeIds(
+    (Array.isArray(c.dicePresets) ? c.dicePresets : []).map((v2) => normalizeDicePreset(rampCtxFull, v2)).filter((x) => x !== null)
+  );
   const focal = typeof c.focal === "object" && c.focal !== null ? (() => {
     const f = c.focal;
     return { x: num2(f.x, 0.5), y: num2(f.y, 0.5), zoom: num2(f.zoom, 100) };
@@ -800,6 +931,7 @@ function normalizeCharacter(v) {
     modifiers: modifiersU,
     lists: listsU,
     ...rampsU.length ? { ramps: rampsU } : {},
+    ...diceU.length ? { dicePresets: diceU } : {},
     theme: normalizeThemeRoles(c.theme),
     lock: normalizeLock(c.lock),
     portrait: typeof c.portrait === "string" && PORTRAIT_DATA_URL.test(c.portrait) ? c.portrait : void 0,
@@ -1630,11 +1762,13 @@ function normalizeMutation2(c, raw, where) {
   if (target.startsWith("capacity:")) {
     const lid = target.slice("capacity:".length);
     if (!c.lists.some((l) => l.id === lid)) argError(`${where} capacity target "lid" does not exist`);
+  } else if (ROLL_TARGETS.includes(target)) {
   } else if (!c.nodes.some((n) => n.id === target)) {
     argError(`${where} targetStatId "${target}" does not exist on this sheet`);
   }
   const operator = str2(o.operator).trim();
   if (!OPS.includes(operator)) argError(`${where} operator must be one of ${OPS.join(", ")}`);
+  if (ROLL_TARGETS.includes(target) && TEXT_OPS.has(operator)) argError(`${where} ${target} is a dice target \u2014 use add, multiply or override`);
   let value;
   if (TEXT_OPS.has(operator)) {
     value = str2(o.value).trim();
@@ -1688,6 +1822,7 @@ function pruneRamps(c) {
     const ctx = rampCtxOf(c);
     for (const m of c.modifiers) if (m.counter && !normalizeRampRef(ctx, m.counter.target)) m.counter = void 0;
   }
+  pruneDicePresets(c);
 }
 var HANDLERS = {
   set_header(c, a) {
@@ -2338,6 +2473,53 @@ var HANDLERS = {
     l.items = l.items.filter((i) => i.id !== it.id);
     pruneRamps(c);
     return `removed "${it.name}" from ${l.name}`;
+  },
+  set_dice_preset(c, a) {
+    const action = a.action === void 0 ? "add" : str2(a.action).trim();
+    if (action !== "add" && action !== "set" && action !== "remove" && action !== "clear")
+      argError("set_dice_preset action must be add, set, remove or clear");
+    if (action === "clear") {
+      if (!c.dicePresets?.length) argError("this sheet has no saved rolls to clear");
+      c.dicePresets = void 0;
+      return "dice: cleared all saved rolls";
+    }
+    if (action === "remove") {
+      const id2 = str2(a.id).trim();
+      if (!id2) argError("set_dice_preset remove needs an id");
+      const had = c.dicePresets?.find((p2) => p2.id === id2);
+      if (!had) argError(`no saved roll with id "${id2}" on this sheet`);
+      const rest = c.dicePresets.filter((p2) => p2.id !== id2);
+      c.dicePresets = rest.length ? rest : void 0;
+      return `dice: removed saved roll "${had.name}"`;
+    }
+    const ctx = { nodes: c.nodes, lists: c.lists, modifiers: c.modifiers.map((m) => ({ id: m.id })) };
+    if (action === "add") {
+      const name = str2(a.name).trim();
+      if (!name) argError("set_dice_preset add needs a name");
+      if (!c.dicePresets?.length && a.pinned === void 0) a.pinned = true;
+      const preset = normalizeDicePreset(ctx, { ...a, id: uid("roll"), name });
+      if (!preset) argError("set_dice_preset: could not read the roll config");
+      if (!Object.keys(preset.counts).length) argError('set_dice_preset add needs at least one die (counts, e.g. {"20": 1})');
+      if (!c.dicePresets) c.dicePresets = [];
+      if (c.dicePresets.length >= 40) argError("this sheet already has 40 saved rolls \u2014 remove one first");
+      c.dicePresets.push(preset);
+      return `dice: saved roll "${preset.name}" (${formatDiceFormula(preset)})${preset.pinned ? " [pinned]" : ""}  (id: ${preset.id})`;
+    }
+    const id = str2(a.id).trim();
+    if (!id) argError("set_dice_preset set needs an id");
+    const p = c.dicePresets?.find((x) => x.id === id);
+    if (!p) argError(`no saved roll with id "${id}" on this sheet`);
+    const merged = { ...p };
+    for (const k of ["name", "pinned", "counts", "bonus", "bonusScope", "statId", "statMode", "goalMode", "goalTarget", "goalCompare", "critRule", "botchOnOne", "cost", "outcome"]) {
+      if (a[k] !== void 0) merged[k] = a[k];
+    }
+    const next = normalizeDicePreset(ctx, merged);
+    if (!next) argError("set_dice_preset: could not read the roll config");
+    if (!Object.keys(next.counts).length) argError("a saved roll needs at least one die (counts)");
+    next.id = p.id;
+    next.pinned = merged.pinned === true;
+    c.dicePresets = c.dicePresets.map((x) => x.id === p.id ? next : x);
+    return `dice: updated saved roll "${next.name}" (${formatDiceFormula(next)})${next.pinned ? " [pinned]" : " [menu]"}  (id: ${next.id})`;
   }
 };
 var TOOL_NAMES = Object.keys(HANDLERS);
@@ -2436,6 +2618,23 @@ function characterSummary(c) {
       );
     }
   }
+  if (c.dicePresets?.length) {
+    lines.push("");
+    lines.push("Dice Presets (saved rolls on the Dice Roller card \u2014 edit via set_dice_preset):");
+    for (const p of c.dicePresets) {
+      const bits = [formatDiceFormula(p)];
+      if (p.bonus) bits.push(`bonus ${p.bonus > 0 ? "+" : ""}${p.bonus}${p.bonusScope === "each" ? " per die" : ""}`);
+      if (p.statId) {
+        const n = c.nodes.find((x) => x.id === p.statId);
+        bits.push(`stat: ${n?.name ?? p.statId} as ${p.statMode ?? "dnd_mod"}`);
+      }
+      if (p.critRule && p.critRule !== "standard") bits.push(`crit: ${p.critRule}`);
+      if (p.botchOnOne) bits.push("botchOnOne");
+      if (p.cost) bits.push(`cost: ${p.cost.amount} ${p.cost.target.kind === "node" ? `from node ${p.cost.target.id}` : `from item ${p.cost.target.itemId}`}`);
+      if (p.outcome) bits.push(`outcome: ${p.outcome.op} ${p.outcome.metric} ${p.outcome.target.kind === "node" ? `on node ${p.outcome.target.id}` : `on item ${p.outcome.target.itemId}`}`);
+      lines.push(`  - ${p.name}${p.pinned ? " [pinned]" : " [menu]"}: ${bits.join(", ")}  (id: ${p.id})`);
+    }
+  }
   return lines.join("\n");
 }
 function characterForServer(c) {
@@ -2472,7 +2671,8 @@ RULES:
 - Pool-LEVEL effects ("when the pool is low I get weak, when it's full I get strong", "at mid pool I regenerate", "low = nothing, high = +4 Str") \u2192 gate with "bands": one entry per level, {"kind":"low"|"mid"|"high", "at": <optional boundary %>, "mutations": [ ... ]}. Defaults without at: low = fill \u2264 33.33%, high = fill \u2265 66.67%, mid = in between. A level with no/empty mutations applies nothing. Multiple mutations per level are fine.
 - VALUE-conditional effects ("when my Strength hits 14", "when HP is 5 or less", "once my Mana reaches 200") \u2192 gate with "mode":"value" and poolId pointing at that node, plus a single "at": use "compare":"gte" (default) for "reaches / at least N" (value \u2265 at) or "compare":"lte" for "drops below / at most N" (value \u2264 at). This is the node's ABSOLUTE number, NOT a percent of the bar. For value LEVELS ("strength below 10 X, 10-19 Y, 20+ Z") \u2192 mode:value with "bands": each {"kind","at","mutations"} where at is an absolute value boundary (low = value \u2264 at, high = value \u2265 at, mid between); multiple mutations per level are fine.
 - RAMPS ("when <A> goes up, <B> also goes up", "every time I spend one, another drops", "when my Health rises, add to my Stamina") \u2192 a sheet-level NUMBER LINK, NOT an effect (an effect shifts a value WHILE ON; a ramp shifts a value when ANOTHER value MOVES). Use set_ramp action:add with watch (the value being tracked) + target (the value that shifts) + direction (up = watch increases / toggle turns on; down = watch decreases / toggle turns off) + step (points to move, negative = down). A watch/target is a ref: {"kind":"node","id":"<id>"} for a stat/pool, {"kind":"item","listId":"<listId>","itemId":"<itemId>"} for a list item, {"kind":"toggle","id":"<effectId>"} to watch an effect turning on/off (targets can be a node or item, never a toggle). "When Health goes up, Stamina +1" \u2192 {watch:{kind:"node",id:"<health>"},target:{kind:"node",id:"<stamina>"},direction:"up",step:1}. "Each time I use a potion, lose 2 Mana" \u2192 watch the potion item (kind:item) direction:down, target the Mana node, step:2. "When I turn off the curse, restore 5 Health" \u2192 watch {kind:"toggle",id:"<curse>"} direction:down (turning OFF), target the Health node, step:5.
-- COUNTERS ("each time I activate <condition>, <pool/item> goes down by one", "every time this buff is toggled on, my Stamina \u22121") \u2192 a rule on THAT effect: add_modifier / set_modifier with a "counter" object {target: <ref>, delta: <points>, offOn?: true, onOff?: true}. It fires whenever the effect toggles: offOn (default true) = when it turns ON, onOff (default false) = when it turns OFF. The target is a stat/pool (kind:node) or list item (kind:item) \u2014 never a toggle. "Each time Heroism is turned on, lose 1 Mana" \u2192 on the Heroism effect, counter:{target:{kind:"node",id:"<mana>"},delta:-1}. Remove a counter with counter:null.
+- COUNTERS ("each time I activate <condition>, <pool/item> goes down by one", "every time this buff is toggled on, my Stamina \u22121") \u2192 a rule on THAT effect: add_modifier / set_modifier with a "counter" object {target: <ref>, delta: <points>, offOn?: true, onOff?: true}. It fires whenever the effect toggles: offOn (default true) = when it turns ON, onOff (default false) = when it turns OFF. The target is a stat/pool (kind:node) or list item (kind:item) \u2014 never a toggle. "Each time Heroism is turned on, lose 1 Mana" \u2192 on the Heroism effect, counter:{target:{kind:"node","id":"<mana>"},delta:-1}. Remove a counter with counter:null.
+- DICE ("create a saved roll / attack roll called X", "10d10 count successes \u2265 6", "exploding crits", "this roll costs 2 Mana and heals by the successes", "roll a d20") \u2192 the Dice Roller card. Saved rolls are managed with set_dice_preset (add / set / remove / clear); the sheet summary lists every saved roll's id. Effects can also bend EVERY roll via mutations on the VIRTUAL targets "roll:bonus" (shift the total bonus, e.g. "cursed: \u22122 to all rolls"), "roll:dice" (extra/fewer dice in the primary die, e.g. "blessed: +1 die"), "roll:goal" (shift the goal number \u2014 negative makes goals EASIER, e.g. "focused: goals \u22121"). Use set_modifier addMutation with those exact targetStatIds; values are plain numbers.
 - "Make the pool turn <color> at full / when low" \u2192 update_node colorFull / colorEmpty (TWO separate colors \u2014 one for 100%, one for 0%). "Color the whole bar <color>" \u2192 update_node color (sets both).
 - "Show floating words/hearts/dribble when the bar is low/high" \u2192 set_node_fx with a low/high side object; "stop the <effect> when <low/full>" \u2192 set_node_fx that side as null.
 - "Play <effect> in the BACKGROUND / across the whole screen / behind the scene (big hearts and sparks rising from the BOTTOM of the screen, drips from the top, words floating anywhere)" \u2192 set_node_bg_fx with the side object \u2014 the dedicated background effect, a SEPARATE entity from the on-bar effect (set_node_fx). Its particles are larger and it keeps playing even when the pool bar is off-screen. "Stop the background <effect>" \u2192 set_node_bg_fx that side as null.
@@ -2558,7 +2758,7 @@ var T = (name, description, properties, required) => ({
   type: "function",
   function: { name, description, parameters: { type: "object", properties, required: required ?? [] } }
 });
-var ICON_ENUM_NOTE = "one of: user, heart, drop, shield, bolt, flask, star, eye, paw, skull, moon, book, crown, tag, bag, gear, scroll, clock, edit, x, check";
+var ICON_ENUM_NOTE = "one of: user, heart, drop, shield, bolt, flask, star, eye, paw, skull, moon, book, crown, tag, bag, gear, scroll, clock, edit, dice, x, check";
 var REF_PROP = {
   type: "object",
   description: `A ref to a value on this sheet. Three shapes: {"kind":"node","id":"<nodeId>"} (a stat/pool's value) \xB7 {"kind":"item","listId":"<listId>","itemId":"<itemId>"} (a list item's quantity) \xB7 {"kind":"toggle","id":"<effectId>"} (an effect's on/off state). Use ONLY ids that appear in the CURRENT SHEET. A TARGET can be a node or an item (never a toggle).`
@@ -2692,6 +2892,24 @@ var TOOLS = [
     listId: { type: "string", description: "list id from the sheet" },
     itemId: { type: "string", description: "item id from the sheet" }
   }, ["listId", "itemId"]),
+  T("set_dice_preset", `Manage SAVED ROLLS on the Dice Roller card. 'add' saves a new roll (needs name + counts); 'set' patches one existing roll by id (only the fields you send change; send statId/cost/outcome as null to clear them); 'remove' deletes by id; 'clear' removes every saved roll. The roll: counts is a map of die face to count ({"20": 1} = 1d20, {"10": 10} = 10d10). goalMode "pool" counts HOW MANY dice meet goalTarget (e.g. 10d10 each >= 6); "total" checks the SUM against goalTarget (a DC); "off" is plain rolling. critRule applies to natural maxes in pool mode: standard | double (2 successes) | explode (rolls an extra die). botchOnOne: natural 1 subtracts a success. A linked stat (statId + statMode dnd_mod | stat_val | pool_dice) feeds the roll with its LIVE value (conditions on that stat count). cost spends from a pool/item each roll; outcome drains/restores/sets a pool (or drains/restores an item) using the roll total or its success count.`, {
+    action: { type: "string", enum: ["add", "set", "remove", "clear"], description: "default add" },
+    id: { type: "string", description: "set/remove: the saved roll id (from the sheet summary)" },
+    name: { type: "string", description: 'the roll label (e.g. "Dagger Strike", "Feral Pool")' },
+    pinned: { type: "boolean", description: "true = one-click pill on the quick bar; false = only in the saved-rolls menu" },
+    counts: { type: "object", description: 'die face \u2192 count, keys "2"|"4"|"6"|"8"|"10"|"12"|"20"|"100", e.g. {"10": 10}' },
+    bonus: { type: "number", description: "flat bonus on the total (default 0)" },
+    bonusScope: { type: "string", enum: ["total", "each"], description: "bonus to the total (default) or to EVERY die" },
+    statId: { type: ["string", "null"], description: "linked stat/pool node id (or null to clear the link)" },
+    statMode: { type: "string", enum: ["dnd_mod", "stat_val", "pool_dice"], description: "dnd_mod = floor((value\u221210)/2) added to the bonus; stat_val = the value added to the bonus; pool_dice = that many extra dice" },
+    goalMode: { type: "string", enum: ["off", "pool", "total"], description: "default off" },
+    goalTarget: { type: "number", description: "the goal number (per die in pool mode, the DC in total mode)" },
+    goalCompare: { type: "string", enum: ["gte", "lte"], description: "default gte (meet or beat); lte = roll under" },
+    critRule: { type: "string", enum: ["standard", "double", "explode"], description: "default standard" },
+    botchOnOne: { type: "boolean", description: "pool mode: a natural 1 subtracts one success" },
+    cost: { type: ["object", "null"], description: `{target: <ref \u2014 node or item>, amount: positive number} spent each roll (null clears). e.g. {"target":{"kind":"node","id":"<mana>"},"amount":2}` },
+    outcome: { type: ["object", "null"], description: `{target: <ref>, op: "drain"|"restore"|"set" (set = node only), metric: "total"|"successes"} applied automatically when the roll settles (null clears). e.g. {"target":{"kind":"node","id":"<hp>"},"op":"restore","metric":"successes"}` }
+  }),
   T("set_image", "Manage the sheet's IMAGE LIBRARY (the portrait / background pictures the user uploads; you reference these by id). 'add' creates a NAMED slot the user then uploads an image to (you cannot upload pixels \u2014 say to the user to upload it in the Images dialog); 'remove' deletes a slot; 'rename' renames one; 'set-active' sets the manual base picture. The sheet summary lists every slot's id + name.", {
     slot: { type: "string", enum: ["portrait", "background"], description: "which library" },
     action: { type: "string", enum: ["add", "remove", "rename", "set-active"], description: "default add" },

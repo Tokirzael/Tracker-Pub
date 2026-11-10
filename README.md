@@ -4,6 +4,31 @@ A self-hosted character sheet tracker. This folder is fully self-contained:
 it ships its own Node runtime, the server, and the web client. Nothing is
 installed system-wide and no build tools are needed.
 
+## What's new (v1.1.0)
+
+- **Dice Roller card.** A dice tray (d2 through d100) plus saved rolls.
+  Rolling is always free - even on a locked sheet, in view mode. Saved
+  rolls are protected by the PIN, like everything else.
+- **Pin your favorites.** Pinned rolls become one-click pills; the rest
+  live in a menu. A saved roll remembers its dice, bonus, goal, cost and
+  outcome.
+- **Goals and crit rules.** Count successes in a dice pool (10d10, each
+  die 6 or better), check a total against a difficulty (roll over or
+  under), let natural maxes count double or EXPLODE (roll another die),
+  and let natural 1s subtract successes.
+- **Rolls that touch the sheet.** Link a stat for its live modifier, as a
+  flat bonus, or as that many extra dice; make a roll spend pool or item
+  quantity, and automatically drain, restore or set a pool - by the
+  roll's total or its success count.
+- **Effects can bend rolls.** Curses and buffs can shift every roll:
+  bonus, extra dice, or easier goals.
+- **The AI Sheet Assistant speaks dice.** "Create a saved roll called
+  Dagger Strike: 1d20 plus Dexterity, crits on a natural 20" - or "cursed:
+  all my rolls minus 2".
+- **Dice rolls appear in the activity ledger** like any other change, and
+  the new dice segment locks behind its own sub-PIN.
+- New sheets ship with two example rolls so you can see it work.
+
 ## Launch
 
 - **Windows:** double-click `Launch Tracker.bat`
@@ -41,4 +66,4 @@ This build ships with NO key of any kind.
   not a developer with browser tools.
 - The server binds to all interfaces when started manually; the launcher
   keeps it on your machine unless you open a tunnel.
-- Rebuilt 2026-10-25 from release `12cbde56` ("blank slate").
+- Built 2026-11-10 from release `972e1e4`.
